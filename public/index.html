@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Gold Price Updater</title>
+  <style>
+    body { font-family: Arial; padding: 40px; }
+    input, button {
+      padding: 12px;
+      width: 300px;
+      margin-top: 10px;
+    }
+    button {
+      background: black;
+      color: white;
+      border: none;
+    }
+  </style>
+</head>
+<body>
+
+<h2>Gold Price Updater</h2>
+
+<label>Gold Rate (₹ per gram)</label><br>
+<input id="goldRate" placeholder="Enter gold rate"><br>
+
+<button onclick="updatePrices()">
+Update Website Prices
+</button>
+
+<script>
+async function updatePrices() {
+
+  const goldRate =
+    document.getElementById("goldRate").value;
+
+  await fetch("/update-prices", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      goldRate
+    })
+  });
+
+  alert("Prices Updated ✅");
+}
+</script>
+
+</body>
+</html>

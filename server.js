@@ -1,162 +1,163 @@
-require("dotenv").config();
+import express from "express";
+import axios from "axios";
+import dotenv from "dotenv";
+import path from "path";
+import { fileURLToPath } from "url";
 
-const express = require("express");
-const session = require("express-session");
-const nodemailer = require("nodemailer");
-const fetch = require("node-fetch");
+dotenv.config();
 
 const app = express();
-app.use(express.urlencoded({ extended: true }));
-app.use(express.static("public"));
+app.use(express.json());
 
-/* SESSION */
+/* ---------- PATH ---------- */
 
-app.use(
-  session({
-    secret: "otp-secret",
-    resave: false,
-    saveUninitialized: true,
-  })
-);
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
-/* MAIL */
+app.use(express.static(path.join(__dirname, "public")));
 
-const transporter = nodemailer.createTransport({
-  service: "gmail",
-  auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASS,
-  },
+/* ---------- IFRAME FIX ---------- */
+
+app.use((req, res, next) => {
+  res.setHeader(
+    "Content-Security-Policy",
+    "frame-ancestors https://admin.shopify.com https://*.myshopify.com"
+  );
+  next();
 });
 
-/* LOGIN */
+/* ---------- ENV ---------- */
+
+const ACCESS_TOKEN = process.env.SHOPIFY_TOKEN;
+const SHOP = process.env.SHOP;
+
+/* =====================================================
+   ROOT UI
+===================================================== */
 
 app.get("/", (req, res) => {
-  if (req.session.login) return res.redirect("/panel");
-
-  res.send(`
-<link rel="stylesheet" href="/style.css">
-<div class="card">
-<img src="/logo.png" class="logo"/>
-<h2>Store Login</h2>
-
-<form method="POST" action="/send-otp">
-<input name="email" required placeholder="Enter Email"/>
-<button>Send OTP</button>
-</form>
-</div>
-`);
+  res.sendFile(
+    path.join(__dirname, "public/index.html")
+  );
 });
 
-/* SEND OTP */
+/* =====================================================
+   GET PRODUCTS
+===================================================== */
 
-app.post("/send-otp", async (req, res) => {
-  const otp = Math.floor(100000 + Math.random() * 900000);
+async function getProducts() {
 
-  req.session.otp = otp;
-
-  await transporter.sendMail({
-    from: process.env.EMAIL_USER,
-    to: req.body.email,
-    subject: "OTP Login",
-    text: `Your OTP is ${otp}`,
-  });
-
-  res.send(`
-<link rel="stylesheet" href="/style.css">
-<div class="card">
-<h2>Enter OTP</h2>
-
-<form method="POST" action="/verify">
-<input name="otp" required/>
-<button>Verify</button>
-</form>
-</div>
-`);
-});
-
-/* VERIFY */
-
-app.post("/verify", (req, res) => {
-  if (req.body.otp == req.session.otp) {
-    req.session.login = true;
-    res.redirect("/panel");
-  } else {
-    res.send("Invalid OTP");
-  }
-});
-
-/* PANEL */
-
-app.get("/panel", (req, res) => {
-  if (!req.session.login) return res.redirect("/");
-
-  res.send(`
-<link rel="stylesheet" href="/style.css">
-
-<div class="card">
-<img src="/logo.png" class="logo"/>
-
-<h2>Price Updater</h2>
-
-<form method="POST" action="/update">
-<input name="gold" placeholder="Gold Rate" required/>
-<input name="silver" placeholder="Silver Rate" required/>
-<button>Update Prices</button>
-</form>
-</div>
-
-<script>
-window.addEventListener("beforeunload",()=>{
-navigator.sendBeacon("/logout-auto");
-});
-</script>
-`);
-});
-
-/* PRICE UPDATE */
-
-app.post("/update", async (req, res) => {
-  const gold = Number(req.body.gold);
-  const silver = Number(req.body.silver);
-
-  const products = await fetch(
-    `https://${process.env.SHOP}/admin/api/2023-10/products.json`,
+  const res = await axios.get(
+    `https://${SHOP}/admin/api/2023-10/products.json`,
     {
       headers: {
-        "X-Shopify-Access-Token": process.env.SHOPIFY_TOKEN,
+        "X-Shopify-Access-Token": ACCESS_TOKEN,
       },
     }
-  ).then((r) => r.json());
+  );
 
-  for (const product of products.products) {
-    for (const variant of product.variants) {
-      await fetch(
-        `https://${process.env.SHOP}/admin/api/2023-10/variants/${variant.id}.json`,
-        {
-          method: "PUT",
-          headers: {
-            "X-Shopify-Access-Token": process.env.SHOPIFY_TOKEN,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            variant: { id: variant.id, price: gold + silver },
-          }),
-        }
-      );
+  return res.data.products;
+}
+
+/* =====================================================
+   GET VARIANT METAFIELDS
+===================================================== */
+
+async function getMetafields(variantId) {
+
+  const res = await axios.get(
+    `https://${SHOP}/admin/api/2023-10/variants/${variantId}/metafields.json`,
+    {
+      headers: {
+        "X-Shopify-Access-Token": ACCESS_TOKEN,
+      },
     }
+  );
+
+  return res.data.metafields;
+}
+
+/* =====================================================
+   UPDATE PRICE LOGIC
+===================================================== */
+
+app.post("/update-prices", async (req, res) => {
+
+  const { goldRate } = req.body;
+
+  try {
+
+    const products = await getProducts();
+
+    for (const product of products) {
+
+      for (const variant of product.variants) {
+
+        const metafields =
+          await getMetafields(variant.id);
+
+        let goldWeight = 0;
+
+        metafields.forEach((mf) => {
+
+          if (
+            mf.namespace === "custom" &&
+            mf.key === "gold_weight"
+          ) {
+            goldWeight =
+              parseFloat(mf.value);
+          }
+        });
+
+        /* ---------- EXISTING PRICE ---------- */
+
+        const basePrice =
+          parseFloat(variant.price);
+
+        /* ---------- CALCULATION ---------- */
+
+        const goldPrice =
+          goldWeight * goldRate;
+
+        const finalPrice =
+          basePrice + goldPrice;
+
+        /* ---------- UPDATE ---------- */
+
+        await axios.put(
+          `https://${SHOP}/admin/api/2023-10/variants/${variant.id}.json`,
+          {
+            variant: {
+              id: variant.id,
+              price: finalPrice.toFixed(2),
+            },
+          },
+          {
+            headers: {
+              "X-Shopify-Access-Token":
+                ACCESS_TOKEN,
+              "Content-Type":
+                "application/json",
+            },
+          }
+        );
+
+        console.log(
+          `Updated ${variant.id} → ₹${finalPrice}`
+        );
+      }
+    }
+
+    res.send("Website Prices Updated ✅");
+
+  } catch (err) {
+    console.error(err.response?.data || err);
+    res.status(500).send("Error updating");
   }
-
-  res.send("Prices Updated");
 });
 
-/* AUTO LOGOUT */
+/* ===================================================== */
 
-app.post("/logout-auto", (req, res) => {
-  req.session.destroy();
+app.listen(3000, () => {
+  console.log("Server running");
 });
-
-/* SERVER */
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT);
